@@ -27,6 +27,8 @@ g++ -std=c++17 -pthread src/<file>.cpp -o <name>
 10 threads × 100,000 increments should give **1,000,000**. With no synchronisation
 (built `-O0`), it never does, and differs every run:
 
+At `-O0`, we see a clear effect. `-O2` may fold whole loop as counter += 100000, hence NOT a real load-add-store, 3 instruction per loop iteration
+
 | Run | 1 | 2 | 3 | 4 | 5 |
 | --- | - | - | - | - | - |
 | actual | 615584 | 491773 | 892655 | 872566 | 993514 |
