@@ -19,3 +19,18 @@ it, to a reusable `ThreadPool` that runs arbitrary work and returns results.
 ```bash
 g++ -std=c++17 -pthread src/<file>.cpp -o <name>
 ```
+
+## Results
+
+### Stage 1 — the race is real
+
+10 threads × 100,000 increments should give **1,000,000**. With no synchronisation
+(built `-O0`), it never does, and differs every run:
+
+| Run | 1 | 2 | 3 | 4 | 5 |
+| --- | - | - | - | - | - |
+| actual | 615584 | 491773 | 892655 | 872566 | 993514 |
+
+`++counter` is a load-add-store; threads read the same value, increment, and write
+back, silently overwriting each other's updates. The lost updates are the missing
+count.
