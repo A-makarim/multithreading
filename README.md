@@ -36,3 +36,26 @@ At `-O0`, we see a clear effect. `-O2` may fold whole loop as counter += 100000,
 `++counter` is a load-add-store; threads read the same value, increment, and write
 back, silently overwriting each other's updates. The lost updates are the missing
 count.
+
+### Stage 2 — two correct fixes, and their cost
+
+Same workload, built `-O2`, averaged over 5 runs:
+
+| Version | Result | Avg time |
+| ------- | ------ | -------- |
+| baseline (racy) | 1,000,000\* | ~3.4 ms |
+| mutex | 1,000,000 | ~80 ms |
+| atomic | 1,000,000 | ~15 ms |
+
+\* Fast but **not safe** — at `-O2` the compiler folds the loop into one add per
+thread, so it *happens* to come out right; Stage 1 (`-O0`) shows it genuinely wrong.
+
+**Why atomic wins:** `++` on a `std::atomic<int>` compiles to a single lock-free CPU
+instruction (an atomic add / compare-and-swap). A `std::mutex` must lock and unlock
+around every increment, and under contention that can drop into the kernel and cause
+context switches — far more expensive than one CPU instruction.
+
+**When to reach for a mutex instead:** atomics only make a *single* operation atomic.
+Use a mutex when you must protect **more than one variable**, or a **critical section
+of several steps** that has to happen as one indivisible unit (e.g. push to a queue
+*and* update a size counter *and* signal a condition variable together).
