@@ -1,0 +1,17 @@
+# Build artifacts
+*.o
+*.obj
+*.exe
+/build/
+race
+sync
+queue_test
+pool_demo
+deadlock
+
+# Debugger / profiler output
+core
+core.*
+perf.data
+perf.data.old
+*.log
