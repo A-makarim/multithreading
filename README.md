@@ -59,3 +59,19 @@ context switches — far more expensive than one CPU instruction.
 Use a mutex when you must protect **more than one variable**, or a **critical section
 of several steps** that has to happen as one indivisible unit (e.g. push to a queue
 *and* update a size counter *and* signal a condition variable together).
+
+### Stage 3 — thread-safe bounded queue
+
+`BoundedQueue<T>`: `push()` blocks while full, `pop()` blocks while empty, using one
+mutex and two condition variables (`not_full`, `not_empty`). Test: 2 producers +
+3 consumers move 10,000 items; the consumed sum/count must match expected.
+
+```
+items: expected=10000 consumed=10000
+sum:   expected=25005000 consumed=25005000  -> OK   (every run)
+```
+
+Key points: `pop`/`push` wait on a **predicate** (`wait(lock, pred)`), which loops
+internally to survive *spurious wakeups*; the mutex is released while waiting and
+re-acquired on wake; and we `notify` after unlocking to avoid waking a thread that
+would immediately block on the mutex.
