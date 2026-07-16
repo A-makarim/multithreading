@@ -88,3 +88,40 @@ Demo: 1,000 `i*i` tasks on 4 threads, results collected via futures:
 ```
 tasks=1000  sum=332833500  expected=332833500  -> OK   (every run)
 ```
+
+### Stage 5 — break it on purpose, diagnose with gdb
+
+`src/05_deadlock_demo.cpp` induces a classic **AB-BA deadlock**: `worker_ab` locks
+`mutex_a` then `mutex_b`; `worker_ba` locks `mutex_b` then `mutex_a`. Each grabs its
+first lock, then waits forever for the second (held by the other). The program hangs.
+
+Diagnosed by attaching to the live, frozen process:
+
+```
+gdb -batch -p <pid> -ex "thread apply all bt"
+```
+
+```
+Thread 3 (worker_ba):
+#0  ntdll!ZwWaitForSingleObject ()      <- blocked acquiring mutex_a
+#1  libwinpthread ... mutex lock
+Thread 2 (worker_ab):
+#0  ntdll!ZwWaitForSingleObject ()      <- blocked acquiring mutex_b
+#1  libwinpthread ... mutex lock
+Thread 1 (main):
+#0  ntdll!ZwWaitForSingleObject ()      <- blocked in t1.join()
+```
+
+**What it reveals:** all application threads are parked in a lock wait and none is
+runnable — the signature of a deadlock. The two workers each hold one mutex and wait
+on the other (AB-BA); main is stuck at `join()` because the workers never finish.
+
+**The fix:** impose a global lock order (always lock `mutex_a` before `mutex_b`), or
+lock both at once with `std::scoped_lock lock(mutex_a, mutex_b);`, which acquires them
+without any AB-BA risk.
+
+> Note: on Linux, `thread apply all bt` prints fully-symbolized frames
+> (`__lll_lock_wait -> pthread_mutex_lock -> std::mutex::lock -> worker_ab()` at the
+> exact source line). On Windows/MinGW the system threading internals ship no debug
+> symbols, so frames appear as `ZwWaitForSingleObject` + `??` — which is why this
+> project targets Linux for the profiling/debugging stages.
