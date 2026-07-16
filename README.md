@@ -75,3 +75,16 @@ Key points: `pop`/`push` wait on a **predicate** (`wait(lock, pred)`), which loo
 internally to survive *spurious wakeups*; the mutex is released while waiting and
 re-acquired on wake; and we `notify` after unlocking to avoid waking a thread that
 would immediately block on the mutex.
+
+### Stage 4 — the thread pool
+
+`ThreadPool(N)` starts N workers that pull callables off a shared queue.
+`submit(f, args...)` wraps the call in a `std::packaged_task` and returns a
+`std::future` for the result. The destructor sets a stop flag, `notify_all()`s so
+no worker is left blocked, and joins every thread.
+
+Demo: 1,000 `i*i` tasks on 4 threads, results collected via futures:
+
+```
+tasks=1000  sum=332833500  expected=332833500  -> OK   (every run)
+```
