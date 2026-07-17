@@ -17,6 +17,7 @@ class ThreadPool {
  public:
   explicit ThreadPool(std::size_t num_threads);
   ~ThreadPool();
+  void shutdown() noexcept;
 
   ThreadPool(const ThreadPool&) = delete;
   ThreadPool& operator=(const ThreadPool&) = delete;

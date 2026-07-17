@@ -1,11 +1,28 @@
 cmake_minimum_required(VERSION 3.16)
 project(ThreadForge LANGUAGES CXX)
 
+option(ENABLE_TSAN "Build with ThreadSanitizer" OFF)
+option(ENABLE_ASAN "Build with AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
+if(ENABLE_TSAN AND ENABLE_ASAN)
+    message(FATAL_ERROR "ENABLE_TSAN and ENABLE_ASAN cannot be enabled together")
+endif()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-add_compile_options(-Wall -Wextra -Wpedantic -O2)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    add_compile_options(-Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+    if(ENABLE_TSAN)
+        add_compile_options(-fsanitize=thread -fno-omit-frame-pointer -g)
+        add_link_options(-fsanitize=thread)
+    elseif(ENABLE_ASAN)
+        add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -g)
+        add_link_options(-fsanitize=address,undefined)
+    endif()
+endif()
+
+include(CTest)
 
 add_library(threadforge_core
     src/client_connection.cpp
@@ -36,6 +53,17 @@ target_link_libraries(thread_pool_test PRIVATE threadforge_core)
 
 add_executable(server_test tests/server_test.cpp)
 target_link_libraries(server_test PRIVATE threadforge_core)
+
+add_executable(client_connection_test tests/client_connection_test.cpp)
+target_link_libraries(client_connection_test PRIVATE threadforge_core)
+
+if(BUILD_TESTING)
+    add_test(NAME bounded_queue COMMAND queue_test)
+    add_test(NAME thread_pool COMMAND thread_pool_test)
+    add_test(NAME client_connection COMMAND client_connection_test)
+    add_test(NAME server_integration COMMAND server_test)
+    set_tests_properties(server_integration PROPERTIES TIMEOUT 20)
+endif()
 
 # Educational stages kept runnable as standalone programs.
 add_executable(stage1_race_condition src/01_race_condition.cpp)

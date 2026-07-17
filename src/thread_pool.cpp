@@ -1,13 +1,17 @@
 #include "thread_pool.hpp"
 
 ThreadPool::ThreadPool(std::size_t num_threads) {
+  if (num_threads == 0) throw std::invalid_argument("thread count must be positive");
   for (std::size_t i = 0; i < num_threads; ++i)
     workers_.emplace_back([this] { worker_loop(); });
 }
 
-ThreadPool::~ThreadPool() {
+ThreadPool::~ThreadPool() { shutdown(); }
+
+void ThreadPool::shutdown() noexcept {
   {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (stop_) return;
     stop_ = true;
   }
   cv_.notify_all();  // wake every worker so none stays blocked on wait()
