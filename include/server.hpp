@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -25,19 +26,19 @@ class TcpJobServer {
 
  private:
   void accept_loop();
-  void client_loop(int client_fd);
+  void client_loop(std::shared_ptr<ClientConnection> connection);
   void worker_loop();
   void close_all_clients();
 
   int port_;
-  int listen_fd_ = -1;
+  std::atomic<int> listen_fd_{-1};
   BoundedQueue<Job> queue_;
   Statistics stats_;
   std::atomic<bool> stopping_{false};
   std::atomic<std::uint64_t> next_job_id_{1};
   std::vector<std::thread> workers_;
   std::vector<std::thread> clients_;
-  std::vector<int> client_fds_;
+  std::vector<std::shared_ptr<ClientConnection>> connections_;
   std::mutex clients_mutex_;
 };
 

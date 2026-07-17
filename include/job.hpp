@@ -1,7 +1,10 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <string>
+
+#include "client_connection.hpp"
 
 namespace threadforge {
 
@@ -10,7 +13,7 @@ enum class JobType { Prime, Sort, Matmul, Hash };
 struct Job {
   JobType type{};
   std::string argument;
-  int client_fd = -1;
+  std::shared_ptr<ClientConnection> connection;
   std::uint64_t id = 0;
 };
 
@@ -19,7 +22,10 @@ struct JobResult {
   std::string message;
 };
 
-Job parse_job_line(const std::string& line, int client_fd, std::uint64_t id);
+inline constexpr std::size_t kMaxRequestLine = 4096;
+
+Job parse_job_line(const std::string& line, std::shared_ptr<ClientConnection> connection,
+                   std::uint64_t id);
 JobResult execute_job(const Job& job);
 
 }  // namespace threadforge
