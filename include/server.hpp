@@ -32,6 +32,7 @@ class TcpJobServer {
 
   int port_;
   std::atomic<int> listen_fd_{-1};
+  std::mutex listen_mutex_;
   BoundedQueue<Job> queue_;
   Statistics stats_;
   std::atomic<bool> stopping_{false};

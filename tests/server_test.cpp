@@ -102,4 +102,20 @@ int main() {
   assert(stats.completed_jobs == 16);
   assert(stats.queue_length == 0);
   assert(stats.active_workers == 0);
+
+  const int load_port = reserve_port();
+  threadforge::TcpJobServer loaded_server(load_port, 2, 4);
+  std::thread loaded_server_thread([&] { loaded_server.run(); });
+  const int loaded_fd = connect_to(load_port);
+  assert(loaded_fd >= 0);
+  std::string expensive_requests;
+  for (int i = 0; i < 100; ++i) expensive_requests += "MATMUL 64\n";
+  assert(::send(loaded_fd, expensive_requests.data(), expensive_requests.size(), 0) ==
+         static_cast<ssize_t>(expensive_requests.size()));
+  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  const auto stop_started = std::chrono::steady_clock::now();
+  loaded_server.stop();
+  loaded_server_thread.join();
+  assert(std::chrono::steady_clock::now() - stop_started < std::chrono::seconds(5));
+  ::close(loaded_fd);
 }

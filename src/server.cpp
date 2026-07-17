@@ -41,6 +41,7 @@ TcpJobServer::TcpJobServer(int port, std::size_t worker_count, std::size_t queue
 TcpJobServer::~TcpJobServer() { stop(); }
 
 void TcpJobServer::run() {
+  std::unique_lock<std::mutex> listen_lock(listen_mutex_);
   if (stopping_.load(std::memory_order_acquire)) return;
   const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
   if (fd < 0) throw std::runtime_error(std::strerror(errno));
@@ -65,13 +66,17 @@ void TcpJobServer::run() {
     throw std::runtime_error(error);
   }
   std::cout << "ThreadForge listening on port " << port_ << '\n';
+  listen_lock.unlock();
   accept_loop();
 }
 
 void TcpJobServer::stop() {
   bool expected = false;
   if (!stopping_.compare_exchange_strong(expected, true)) return;
-  close_fd(listen_fd_.exchange(-1, std::memory_order_acq_rel));
+  {
+    std::lock_guard<std::mutex> lock(listen_mutex_);
+    close_fd(listen_fd_.exchange(-1, std::memory_order_acq_rel));
+  }
   close_all_clients();
   queue_.close();
   std::vector<std::thread> clients;
