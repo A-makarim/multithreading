@@ -3,6 +3,7 @@
 *.obj
 *.exe
 /build/
+/build-*/
 race
 sync
 queue_test

@@ -1,128 +1,199 @@
-# ThreadForge: High-Performance Multithreaded TCP Job Server
+# ThreadForge
 
-ThreadForge is a C++20/Linux systems programming project that grows from small concurrency exercises into a realistic multithreaded TCP job server. The early stages remain in the repository because they explain the engineering path: first observe a data race, then fix it with mutexes and atomics, build a bounded producer-consumer queue, wrap work in a fixed thread pool, debug a deadlock, and finally compose those pieces into a network service.
+ThreadForge is an educational C++20/Linux multithreaded TCP job server. It is
+small enough to explain line-by-line while demonstrating production-style
+design considerations: explicit socket ownership, bounded back-pressure,
+message-safe concurrent writes, exception-safe statistics, and deterministic
+shutdown. It is not production-ready.
 
-## Architecture
-
-```text
-Clients
-   |
-   v
-TCP Listener / accept thread
-   |
-   v
-Per-client reader + Request Parser
-   |
-   v
-Bounded Blocking Queue<Job>
-   |
-   v
-Fixed Worker Thread Pool
-   |
-   v
-Job Execution: PRIME / SORT / MATMUL / HASH
-   |
-   v
-Client Response: OK result / ERROR message
-```
-
-The networking path never performs CPU-heavy work. It accepts sockets, reads one-line commands, validates them into `Job` objects, and applies back-pressure by pushing into the bounded queue. Worker threads are the only threads that execute jobs and send the corresponding response to the client socket.
-
-## Thread model
-
-* **Listener thread** owns `accept(2)` and creates one lightweight client-reader thread per connection.
-* **Client-reader threads** call `recv(2)`, parse newline-delimited commands, and enqueue jobs.
-* **Worker threads** block on the queue, execute jobs, update atomics, and write responses.
-* **Main thread** handles Ctrl+C and coordinates graceful shutdown.
-
-This is intentionally not an event-loop framework. The goal is to make POSIX sockets, blocking synchronization, ownership, shutdown, and contention visible enough to discuss in an interview.
-
-## Job protocol
-
-Send one command per line:
+## Architecture and thread model
 
 ```text
-PRIME 10000019
-SORT 500000
-MATMUL 256
-HASH hello world
+main / signal flag
+       |
+       v
+accept loop ---- shared active-connection registry
+       |
+       +--> one blocking reader thread per client
+                    |
+                    v
+             validated Job + shared_ptr<ClientConnection>
+                    |
+                    v
+             BoundedQueue<Job> (back-pressure)
+                    |
+                    v
+             fixed worker threads
+                    |
+                    v
+           PRIME / SORT / MATMUL / HASH
+                    |
+                    v
+       ClientConnection::send_line() mutex --> client
 ```
 
-Responses are newline-delimited:
+The accept loop creates one reader thread for each client. Readers perform
+newline framing and validation but no CPU-heavy work. A fixed set of workers
+drains the bounded queue and executes jobs. The separate `ThreadPool` class and
+early-stage programs are retained as educational steps; the TCP server uses its
+own typed job queue so its lifecycle remains visible.
+
+`ClientConnection` owns one socket and closes it exactly once. It is shared by
+the reader, queued jobs, workers, and the active-client registry because any of
+those may legitimately outlive another. Its atomic open flag provides cheap
+state observation; its mutex protects the compound send/close operations. The
+same mutex covers every byte of a response, including partial `send()` retries,
+so two workers cannot interleave protocol lines on one TCP stream.
+
+The queue blocks producers at its fixed capacity instead of allowing unbounded
+memory growth. Queue statistics are updated inside the successful enqueue's
+critical section, preventing a fast consumer from decrementing before the
+matching increment.
+
+## Protocol and limits
+
+Requests are one line each (maximum 4096 bytes):
 
 ```text
-OK prime
-OK sorted 500000 checksum ...
-ERROR unknown command
+PRIME <positive uint64>
+SORT <count from 1 to 2000000>
+MATMUL <size from 1 to 512>
+HASH <non-empty text>
 ```
 
-## Synchronization strategy
+Every parsed line receives a server job ID. Responses are:
 
-* `BoundedQueue<T>` uses one mutex to protect the queue and two condition variables: `not_empty` for consumers and `not_full` for producers.
-* Predicate waits are used because condition variables can wake spuriously; every wake re-checks the real state.
-* `notify_one` is used after normal push/pop because one new slot or one new item can satisfy exactly one opposite-side waiter.
-* `notify_all` is used only for shutdown because every sleeping producer and consumer must observe that the queue is closed.
-* Runtime counters use `std::atomic<std::uint64_t>` because they are independent scalar measurements; a mutex would serialize unrelated statistics reads/writes on a hot path.
-* The worker count is fixed to avoid unbounded thread creation under load. Queue capacity is fixed so overload becomes back-pressure instead of memory growth.
+```text
+OK <job_id> <result>
+ERROR <job_id> <message>
+```
 
-## Build
+Jobs from one client can finish out of order because multiple workers execute
+them concurrently. Clients must correlate responses by job ID and must not rely
+on response order. Invalid integers, unsupported commands, oversized requests,
+and out-of-range arguments receive explicit errors. The limits prevent client
+input from directly causing unbounded allocations.
+
+## Shutdown
+
+Ctrl+C only sets a `sig_atomic_t` flag. Normal program control then:
+
+1. atomically marks the server stopping (making `stop()` idempotent);
+2. shuts down and closes the listener to unblock `accept()`;
+3. copies active shared connections under the registry mutex, releases it, and
+   shuts them down to unblock `recv()`;
+4. closes the bounded queue, rejecting blocked producers and waking workers;
+5. joins client readers, lets already queued jobs finish safely, then joins workers;
+6. releases registry references and prints final statistics.
+
+No registry lock is held across network operations or joins. `MSG_NOSIGNAL` is
+used where available, so a disconnected peer cannot terminate the process with
+`SIGPIPE`.
+
+## Build and run
+
+On Linux, or from an Ubuntu WSL shell on Windows:
 
 ```bash
-cmake -S . -B build
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
-```
-
-## Run
-
-Start the server:
-
-```bash
 ./build/threadforge_server 9000 4 1024
 ```
 
-Use the interactive client:
+Arguments are port, worker count, and queue capacity. In another terminal:
 
 ```bash
-printf 'PRIME 10000019\nHASH hello world\n' | ./build/threadforge_client 127.0.0.1 9000
+printf 'PRIME 10000019\nHASH hello world\n' |
+  ./build/threadforge_client 127.0.0.1 9000
 ```
 
-Run the preserved learning stages:
+## Tests and sanitizers
+
+The tests cover multi-producer/multi-consumer integrity, wake-on-close, futures
+and pool shutdown, parser limits, concurrent connection writes, repeated socket
+shutdown, multi-client loopback integration, response IDs, and server shutdown.
 
 ```bash
-./build/stage1_race_condition
-./build/stage2_synchronised
-./build/stage3_queue_demo
-./build/stage4_thread_pool_demo
-./build/stage5_deadlock_demo   # intentionally hangs
+ctest --test-dir build --output-on-failure
+
+cmake -S . -B build-asan -DENABLE_ASAN=ON
+cmake --build build-asan -j
+ctest --test-dir build-asan --output-on-failure
+
+cmake -S . -B build-tsan -DENABLE_TSAN=ON
+cmake --build build-tsan -j
+ctest --test-dir build-tsan --output-on-failure
 ```
 
-## Tests and benchmarks
+ASAN includes UndefinedBehaviorSanitizer. ASAN/UBSAN and TSAN cannot be enabled
+together. On the benchmark WSL2 environment, the integration test passed under
+ASAN/UBSAN. GCC TSAN could compile but could not start because WSL reported
+`ThreadSanitizer: unexpected memory mapping`; run the documented TSAN build on
+a native Linux host or CI runner for a meaningful race check.
+
+## Reproducible benchmarks
+
+Run one workload:
 
 ```bash
-./build/queue_test
-./build/thread_pool_test
-./build/server_test
-./build/load_test 127.0.0.1 9000 100
+./build/load_test --host 127.0.0.1 --port 9000 --clients 25 \
+  --requests-per-client 100 --workload prime --prime-value 32416190071
 ```
 
-The benchmark harness runs 1, 5, 10, 25, 50, and 100 clients. To compare worker counts, restart the server with 1, 2, 4, and 8 workers and record the output in `benchmarks/results.md`.
+Modes are `prime`, `sort`, `matmul`, and `mixed`. Mixed is a deterministic cycle
+of 50% PRIME, 30% SORT, and 20% MATMUL with client offsets. Each client keeps one
+request outstanding, measures round-trip latency with `steady_clock`, validates
+the returned job ID, and reports successes, failures, duration, throughput,
+mean, median, p95, p99, and maximum latency.
 
-## Repository map
+The matrix script restarts the server for 1/2/4/8 workers and
+1/5/10/25/50/100 clients, then writes `benchmarks/results.csv`:
 
-* `include/` contains reusable project interfaces: queue, job model, statistics, server, and thread pool.
-* `src/` contains the server implementation and preserved educational stages.
-* `client/` contains a minimal TCP client for manual testing.
-* `benchmarks/` contains the load generator and results template.
-* `tests/` contains small executable tests that avoid third-party frameworks.
-* `docs/` documents each learning stage.
+```bash
+BUILD_DIR=build REQUESTS_PER_CLIENT=50 WORKLOAD=prime \
+  bash benchmarks/run_benchmarks.sh
+```
 
-## Lessons learned
+### Measured summary
 
-A concurrent server is mostly about ownership and failure modes. The interesting parts are not only the happy-path algorithm; they are bounded memory, wakeup discipline, clean shutdown, broken client sockets, and keeping CPU work out of networking threads. ThreadForge keeps the code small enough to explain line-by-line while still exercising real Linux APIs and production-style concurrency decisions.
+Real results were measured using Ubuntu 24.04 under WSL2, GCC 13.3.0 `-O2`,
+and an Intel Core i5-13500HX (10 cores / 20 logical CPUs). All 38,200 requests
+across the matrix succeeded.
 
-## Future work
+| Workers | Throughput at 100 clients | Mean latency | p99 latency |
+| ---: | ---: | ---: | ---: |
+| 1 | 2,403 req/s | 40.81 ms | 46.01 ms |
+| 2 | 4,505 req/s | 21.62 ms | 35.15 ms |
+| 4 | 8,491 req/s | 11.36 ms | 16.70 ms |
+| 8 | 13,659 req/s | 6.88 ms | 9.98 ms |
 
-* Add length-prefixed protocol framing for binary-safe requests.
-* Replace per-client reader threads with `epoll` while keeping the same worker queue.
-* Add latency histograms and percentile reporting to the benchmark harness.
-* Add structured logging and configurable job mixes.
+The complete 24-run table and honest interpretation are in
+[`benchmarks/results.md`](benchmarks/results.md); raw values are in
+[`benchmarks/results.csv`](benchmarks/results.csv). CPU-heavy PRIME work scaled
+with workers until synchronization and hardware effects reduced the incremental
+gain. High client counts increased queueing and tail latency, especially with
+one or two workers. Tiny jobs and one outstanding request do not expose the same
+parallel speedup. These numbers are machine-specific single runs, not universal
+performance claims.
+
+For additional Linux process measurements:
+
+```bash
+/usr/bin/time -v ./build/threadforge_server 9000 4 1024  # elapsed, RSS, switches
+pidstat -p <server-pid> 1                                # CPU over time
+perf stat -p <server-pid>                                # cycles and switches
+```
+
+## Known limitations and future work
+
+- One blocking reader thread per client does not scale like `epoll`.
+- Newline framing is text-only; binary data needs length-prefixed framing.
+- There is no request cancellation, authentication, TLS, priority queue, or
+  structured logging.
+- Job IDs are assigned by the server, not supplied by clients; highly pipelined
+  clients need their own correlation convention or a future protocol extension.
+- `std::hash` is implementation-defined and is not a cryptographic hash.
+- The benchmark uses one outstanding request per connection and single runs;
+  repeated trials and latency histograms would improve statistical confidence.
+- Future work could add `epoll`, request cancellation, priorities, structured
+  logs, TLS, NUMA-aware worker placement, and stable client request IDs.
