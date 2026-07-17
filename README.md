@@ -1,127 +1,128 @@
-# threadpool-cpp
+# ThreadForge: High-Performance Multithreaded TCP Job Server
 
-A hand-rolled C++ thread pool, built from first principles with only the standard
-library (`std::thread`, `std::mutex`, `std::condition_variable`, `std::atomic`,
-`std::future`). The journey goes from *proving* a race condition exists, to fixing
-it, to a reusable `ThreadPool` that runs arbitrary work and returns results.
+ThreadForge is a C++20/Linux systems programming project that grows from small concurrency exercises into a realistic multithreaded TCP job server. The early stages remain in the repository because they explain the engineering path: first observe a data race, then fix it with mutexes and atomics, build a bounded producer-consumer queue, wrap work in a fixed thread pool, debug a deadlock, and finally compose those pieces into a network service.
 
-## Stages
+## Architecture
 
-1. **Prove the problem** — an unsynchronised shared counter gives wrong, varying results.
-2. **Fix it two ways** — `std::mutex` vs `std::atomic`, with timings.
-3. **Bounded queue** — a thread-safe producer-consumer `BoundedQueue<T>`.
-4. **Thread pool** — `submit()` returning `std::future`, clean shutdown.
-5. **Break it on purpose** — a deadlock/hang, diagnosed live with `gdb`.
-6. **Benchmark** (optional) — throughput vs `std::async`.
+```text
+Clients
+   |
+   v
+TCP Listener / accept thread
+   |
+   v
+Per-client reader + Request Parser
+   |
+   v
+Bounded Blocking Queue<Job>
+   |
+   v
+Fixed Worker Thread Pool
+   |
+   v
+Job Execution: PRIME / SORT / MATMUL / HASH
+   |
+   v
+Client Response: OK result / ERROR message
+```
+
+The networking path never performs CPU-heavy work. It accepts sockets, reads one-line commands, validates them into `Job` objects, and applies back-pressure by pushing into the bounded queue. Worker threads are the only threads that execute jobs and send the corresponding response to the client socket.
+
+## Thread model
+
+* **Listener thread** owns `accept(2)` and creates one lightweight client-reader thread per connection.
+* **Client-reader threads** call `recv(2)`, parse newline-delimited commands, and enqueue jobs.
+* **Worker threads** block on the queue, execute jobs, update atomics, and write responses.
+* **Main thread** handles Ctrl+C and coordinates graceful shutdown.
+
+This is intentionally not an event-loop framework. The goal is to make POSIX sockets, blocking synchronization, ownership, shutdown, and contention visible enough to discuss in an interview.
+
+## Job protocol
+
+Send one command per line:
+
+```text
+PRIME 10000019
+SORT 500000
+MATMUL 256
+HASH hello world
+```
+
+Responses are newline-delimited:
+
+```text
+OK prime
+OK sorted 500000 checksum ...
+ERROR unknown command
+```
+
+## Synchronization strategy
+
+* `BoundedQueue<T>` uses one mutex to protect the queue and two condition variables: `not_empty` for consumers and `not_full` for producers.
+* Predicate waits are used because condition variables can wake spuriously; every wake re-checks the real state.
+* `notify_one` is used after normal push/pop because one new slot or one new item can satisfy exactly one opposite-side waiter.
+* `notify_all` is used only for shutdown because every sleeping producer and consumer must observe that the queue is closed.
+* Runtime counters use `std::atomic<std::uint64_t>` because they are independent scalar measurements; a mutex would serialize unrelated statistics reads/writes on a hot path.
+* The worker count is fixed to avoid unbounded thread creation under load. Queue capacity is fixed so overload becomes back-pressure instead of memory growth.
 
 ## Build
 
 ```bash
-g++ -std=c++17 -pthread src/<file>.cpp -o <name>
+cmake -S . -B build
+cmake --build build -j
 ```
 
-## Results
+## Run
 
-### Stage 1 — the race is real
+Start the server:
 
-10 threads × 100,000 increments should give **1,000,000**. With no synchronisation
-(built `-O0`), it never does, and differs every run:
-
-At `-O0`, we see a clear effect. `-O2` may fold whole loop as counter += 100000, hence NOT a real load-add-store, 3 instruction per loop iteration
-
-| Run | 1 | 2 | 3 | 4 | 5 |
-| --- | - | - | - | - | - |
-| actual | 615584 | 491773 | 892655 | 872566 | 993514 |
-
-`++counter` is a load-add-store; threads read the same value, increment, and write
-back, silently overwriting each other's updates. The lost updates are the missing
-count.
-
-### Stage 2 — two correct fixes, and their cost
-
-Same workload, built `-O2`, averaged over 5 runs:
-
-| Version | Result | Avg time |
-| ------- | ------ | -------- |
-| baseline (racy) | 1,000,000\* | ~3.4 ms |
-| mutex | 1,000,000 | ~80 ms |
-| atomic | 1,000,000 | ~15 ms |
-
-\* Fast but **not safe** — at `-O2` the compiler folds the loop into one add per
-thread, so it *happens* to come out right; Stage 1 (`-O0`) shows it genuinely wrong.
-
-**Why atomic wins:** `++` on a `std::atomic<int>` compiles to a single lock-free CPU
-instruction (an atomic add / compare-and-swap). A `std::mutex` must lock and unlock
-around every increment, and under contention that can drop into the kernel and cause
-context switches — far more expensive than one CPU instruction.
-
-**When to reach for a mutex instead:** atomics only make a *single* operation atomic.
-Use a mutex when you must protect **more than one variable**, or a **critical section
-of several steps** that has to happen as one indivisible unit (e.g. push to a queue
-*and* update a size counter *and* signal a condition variable together).
-
-### Stage 3 — thread-safe bounded queue
-
-`BoundedQueue<T>`: `push()` blocks while full, `pop()` blocks while empty, using one
-mutex and two condition variables (`not_full`, `not_empty`). Test: 2 producers +
-3 consumers move 10,000 items; the consumed sum/count must match expected.
-
-```
-items: expected=10000 consumed=10000
-sum:   expected=25005000 consumed=25005000  -> OK   (every run)
+```bash
+./build/threadforge_server 9000 4 1024
 ```
 
-Key points: `pop`/`push` wait on a **predicate** (`wait(lock, pred)`), which loops
-internally to survive *spurious wakeups*; the mutex is released while waiting and
-re-acquired on wake; and we `notify` after unlocking to avoid waking a thread that
-would immediately block on the mutex.
+Use the interactive client:
 
-### Stage 4 — the thread pool
-
-`ThreadPool(N)` starts N workers that pull callables off a shared queue.
-`submit(f, args...)` wraps the call in a `std::packaged_task` and returns a
-`std::future` for the result. The destructor sets a stop flag, `notify_all()`s so
-no worker is left blocked, and joins every thread.
-
-Demo: 1,000 `i*i` tasks on 4 threads, results collected via futures:
-
-```
-tasks=1000  sum=332833500  expected=332833500  -> OK   (every run)
+```bash
+printf 'PRIME 10000019\nHASH hello world\n' | ./build/threadforge_client 127.0.0.1 9000
 ```
 
-### Stage 5 — break it on purpose, diagnose with gdb
+Run the preserved learning stages:
 
-`src/05_deadlock_demo.cpp` induces a classic **AB-BA deadlock**: `worker_ab` locks
-`mutex_a` then `mutex_b`; `worker_ba` locks `mutex_b` then `mutex_a`. Each grabs its
-first lock, then waits forever for the second (held by the other). The program hangs.
-
-Diagnosed by attaching to the live, frozen process:
-
-```
-gdb -batch -p <pid> -ex "thread apply all bt"
+```bash
+./build/stage1_race_condition
+./build/stage2_synchronised
+./build/stage3_queue_demo
+./build/stage4_thread_pool_demo
+./build/stage5_deadlock_demo   # intentionally hangs
 ```
 
-```
-Thread 3 (worker_ba):
-#0  ntdll!ZwWaitForSingleObject ()      <- blocked acquiring mutex_a
-#1  libwinpthread ... mutex lock
-Thread 2 (worker_ab):
-#0  ntdll!ZwWaitForSingleObject ()      <- blocked acquiring mutex_b
-#1  libwinpthread ... mutex lock
-Thread 1 (main):
-#0  ntdll!ZwWaitForSingleObject ()      <- blocked in t1.join()
+## Tests and benchmarks
+
+```bash
+./build/queue_test
+./build/thread_pool_test
+./build/server_test
+./build/load_test 127.0.0.1 9000 100
 ```
 
-**What it reveals:** all application threads are parked in a lock wait and none is
-runnable — the signature of a deadlock. The two workers each hold one mutex and wait
-on the other (AB-BA); main is stuck at `join()` because the workers never finish.
+The benchmark harness runs 1, 5, 10, 25, 50, and 100 clients. To compare worker counts, restart the server with 1, 2, 4, and 8 workers and record the output in `benchmarks/results.md`.
 
-**The fix:** impose a global lock order (always lock `mutex_a` before `mutex_b`), or
-lock both at once with `std::scoped_lock lock(mutex_a, mutex_b);`, which acquires them
-without any AB-BA risk.
+## Repository map
 
-> Note: on Linux, `thread apply all bt` prints fully-symbolized frames
-> (`__lll_lock_wait -> pthread_mutex_lock -> std::mutex::lock -> worker_ab()` at the
-> exact source line). On Windows/MinGW the system threading internals ship no debug
-> symbols, so frames appear as `ZwWaitForSingleObject` + `??` — which is why this
-> project targets Linux for the profiling/debugging stages.
+* `include/` contains reusable project interfaces: queue, job model, statistics, server, and thread pool.
+* `src/` contains the server implementation and preserved educational stages.
+* `client/` contains a minimal TCP client for manual testing.
+* `benchmarks/` contains the load generator and results template.
+* `tests/` contains small executable tests that avoid third-party frameworks.
+* `docs/` documents each learning stage.
+
+## Lessons learned
+
+A concurrent server is mostly about ownership and failure modes. The interesting parts are not only the happy-path algorithm; they are bounded memory, wakeup discipline, clean shutdown, broken client sockets, and keeping CPU work out of networking threads. ThreadForge keeps the code small enough to explain line-by-line while still exercising real Linux APIs and production-style concurrency decisions.
+
+## Future work
+
+* Add length-prefixed protocol framing for binary-safe requests.
+* Replace per-client reader threads with `epoll` while keeping the same worker queue.
+* Add latency histograms and percentile reporting to the benchmark harness.
+* Add structured logging and configurable job mixes.

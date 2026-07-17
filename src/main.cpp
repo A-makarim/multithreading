@@ -1,27 +1,24 @@
-#include <cstdio>
-#include <future>
-#include <vector>
-#include "thread_pool.hpp"
+#include "server.hpp"
 
-// Submit 1,000 tasks (each computes i*i) to a pool of 4 threads, collect every
-// future, sum the results, and check against the known answer.
-int main() {
-  constexpr int kTasks = 1000;
-  ThreadPool pool(4);
+#include <atomic>
+#include <csignal>
+#include <cstdlib>
+#include <iostream>
+#include <thread>
 
-  std::vector<std::future<long long>> futures;
-  futures.reserve(kTasks);
-  for (int i = 0; i < kTasks; ++i)
-    futures.push_back(
-        pool.submit([](int x) -> long long { return static_cast<long long>(x) * x; }, i));
+std::atomic<bool> g_stop{false};
+void on_signal(int) { g_stop.store(true); }
 
-  long long sum = 0;
-  for (auto& f : futures) sum += f.get();  // blocks until each task is done
-
-  long long expected = 0;
-  for (int i = 0; i < kTasks; ++i) expected += static_cast<long long>(i) * i;
-
-  std::printf("tasks=%d  sum=%lld  expected=%lld  -> %s\n", kTasks, sum, expected,
-              sum == expected ? "OK" : "MISMATCH");
-  return 0;
+int main(int argc, char** argv) {
+  const int port = argc > 1 ? std::atoi(argv[1]) : 9000;
+  const std::size_t workers = argc > 2 ? std::strtoull(argv[2], nullptr, 10) : std::thread::hardware_concurrency();
+  const std::size_t capacity = argc > 3 ? std::strtoull(argv[3], nullptr, 10) : 1024;
+  std::signal(SIGINT, on_signal);
+  threadforge::TcpJobServer server(port, workers == 0 ? 4 : workers, capacity);
+  std::thread runner([&] { server.run(); });
+  while (!g_stop.load()) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  server.stop();
+  runner.join();
+  auto s = server.statistics().snapshot();
+  std::cout << "submitted=" << s.submitted_jobs << " completed=" << s.completed_jobs << " failed=" << s.failed_jobs << '\n';
 }
