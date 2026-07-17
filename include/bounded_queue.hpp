@@ -19,11 +19,19 @@ class BoundedQueue {
   }
 
   bool push(T item) {
+    return push(std::move(item), [] {});
+  }
+
+  template <class OnPushed>
+  bool push(T item, OnPushed&& on_pushed) {
     std::unique_lock<std::mutex> lock(mutex_);
     // Predicate waits handle spurious wakeups and sleep without burning CPU.
     not_full_.wait(lock, [this] { return closed_ || queue_.size() < capacity_; });
     if (closed_) return false;
     queue_.push(std::move(item));
+    // Run tiny bookkeeping while the queue lock still establishes ordering
+    // with pop(); this prevents a consumer decrement racing ahead of increment.
+    std::forward<OnPushed>(on_pushed)();
     lock.unlock();
     not_empty_.notify_one();  // one item can wake one consumer; avoids thundering herd.
     return true;

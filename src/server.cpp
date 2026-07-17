@@ -41,9 +41,14 @@ TcpJobServer::TcpJobServer(int port, std::size_t worker_count, std::size_t queue
 TcpJobServer::~TcpJobServer() { stop(); }
 
 void TcpJobServer::run() {
+  if (stopping_.load(std::memory_order_acquire)) return;
   const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
   if (fd < 0) throw std::runtime_error(std::strerror(errno));
   listen_fd_.store(fd, std::memory_order_release);
+  if (stopping_.load(std::memory_order_acquire)) {
+    close_fd(listen_fd_.exchange(-1));
+    return;
+  }
   int yes = 1;
   if (::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes)) < 0) {
     close_fd(listen_fd_.exchange(-1));
@@ -102,9 +107,9 @@ void TcpJobServer::accept_loop() {
         break;
       }
       connections_.push_back(connection);
+      stats_.client_connected();
       clients_.emplace_back([this, connection] { client_loop(connection); });
     }
-    stats_.client_connected();
   }
 }
 
@@ -129,9 +134,7 @@ void TcpJobServer::client_loop(std::shared_ptr<ClientConnection> connection) {
       try {
         Job job = parse_job_line(line, connection, id);
         stats_.job_submitted();
-        if (queue_.push(std::move(job))) {
-          stats_.queue_inc();
-        } else {
+        if (!queue_.push(std::move(job), [this] { stats_.queue_inc(); })) {
           stats_.job_failed();
           connection->send_line(response(false, id, "server shutting down"));
         }
