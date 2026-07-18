@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        compiler: [gcc, clang]
+        build-type: [Debug, Release]
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake build-essential
+        if [ "${{ matrix.compiler }}" = "clang" ]; then
+          sudo apt-get install -y clang
+        fi
+    
+    - name: Configure CMake
+      env:
+        CC: ${{ matrix.compiler == 'gcc' && 'gcc' || 'clang' }}
+        CXX: ${{ matrix.compiler == 'gcc' && 'g++' || 'clang++' }}
+      run: cmake -S . -B build -DCMAKE_BUILD_TYPE=${{ matrix.build-type }}
+    
+    - name: Build
+      run: cmake --build build -j
+    
+    - name: Run tests
+      run: ctest --test-dir build --output-on-failure
+
+  sanitizers:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        sanitizer: [asan, tsan]
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake build-essential
+    
+    - name: Configure CMake with ${{ matrix.sanitizer }}
+      run: |
+        if [ "${{ matrix.sanitizer }}" = "asan" ]; then
+          cmake -S . -B build -DENABLE_ASAN=ON
+        else
+          cmake -S . -B build -DENABLE_TSAN=ON
+        fi
+    
+    - name: Build
+      run: cmake --build build -j
+    
+    - name: Run tests with ${{ matrix.sanitizer }}
+      run: ctest --test-dir build --output-on-failure
