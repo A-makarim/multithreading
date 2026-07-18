@@ -114,7 +114,7 @@ and pool shutdown, parser limits, concurrent connection writes, repeated socket
 shutdown, multi-client loopback integration, response IDs, and server shutdown.
 
 ```bash
-ctest --test-dir build --output-on-failure
+ --test-dir build --output-on-failure
 
 cmake -S . -B build-asan -DENABLE_ASAN=ON
 cmake --build build-asan -j
