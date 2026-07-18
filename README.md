@@ -109,13 +109,50 @@ printf 'PRIME 10000019\nHASH hello world\n' |
 
 ## Tests and sanitizers
 
-The tests cover multi-producer/multi-consumer integrity, wake-on-close, futures
+### Running tests
+
+The test suite covers multi-producer/multi-consumer integrity, wake-on-close, futures
 and pool shutdown, parser limits, concurrent connection writes, repeated socket
 shutdown, multi-client loopback integration, response IDs, and server shutdown.
 
 ```bash
 ctest --test-dir build --output-on-failure
+```
 
+### Test cases
+
+The repository includes four comprehensive test suites:
+
+#### 1. **bounded_queue** (`tests/test_bounded_queue.cpp`)
+- Tests multi-producer/multi-consumer queue integrity
+- Verifies wake-on-close behavior
+- Validates queue statistics accuracy
+- Ensures thread-safe enqueue/dequeue operations
+
+#### 2. **thread_pool** (`tests/test_thread_pool.cpp`)
+- Tests thread pool futures and task execution
+- Verifies proper shutdown behavior
+- Validates worker thread lifecycle
+- Tests exception handling in worker threads
+
+#### 3. **client_connection** (`tests/test_client_connection.cpp`)
+- Tests concurrent connection writes from multiple threads
+- Verifies socket shutdown behavior
+- Ensures message safety and atomicity
+- Tests repeated shutdown operations
+
+#### 4. **server_integration** (`tests/test_server_integration.cpp`)
+- Multi-client loopback integration test
+- Tests parser limits and error handling
+- Validates response IDs and ordering
+- Tests graceful server shutdown with active connections
+
+### Running with sanitizers
+
+ASAN includes UndefinedBehaviorSanitizer. ASAN/UBSAN and TSAN cannot be enabled
+together.
+
+```bash
 cmake -S . -B build-asan -DENABLE_ASAN=ON
 cmake --build build-asan -j
 ctest --test-dir build-asan --output-on-failure
@@ -125,8 +162,7 @@ cmake --build build-tsan -j
 ctest --test-dir build-tsan --output-on-failure
 ```
 
-ASAN includes UndefinedBehaviorSanitizer. ASAN/UBSAN and TSAN cannot be enabled
-together. On the benchmark WSL2 environment, the integration test passed under
+On the benchmark WSL2 environment, the integration test passed under
 ASAN/UBSAN. GCC TSAN could compile but could not start because WSL reported
 `ThreadSanitizer: unexpected memory mapping`; run the documented TSAN build on
 a native Linux host or CI runner for a meaningful race check.
