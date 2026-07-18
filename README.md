@@ -136,7 +136,7 @@ a native Linux host or CI runner for a meaningful race check.
 Run one workload:
 
 ```bash
-./build/load_test --host 127.0.0.1 --clients 25 \
+./build/load_test --host 127.0.0.1 --port 9000 --clients 25 \
   --requests-per-client 100 --workload prime --prime-value 32416190071
 ```
 
