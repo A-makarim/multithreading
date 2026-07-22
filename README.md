@@ -109,13 +109,37 @@ printf 'PRIME 10000019\nHASH hello world\n' |
 
 ## Tests and sanitizers
 
-The tests cover multi-producer/multi-consumer integrity, wake-on-close, futures
-and pool shutdown, parser limits, concurrent connection writes, repeated socket
-shutdown, multi-client loopback integration, response IDs, and server shutdown.
+### Test cases
+
+The project includes four comprehensive test suites:
+
+1. **bounded_queue** (`tests/queue_test.cpp`) - Tests multi-producer/multi-consumer
+   integrity, wake-on-close, and queue statistics under concurrent access.
+
+2. **thread_pool** (`tests/thread_pool_test.cpp`) - Tests thread pool futures,
+   shutdown behavior, and task execution.
+
+3. **client_connection** (`tests/client_connection_test.cpp`) - Tests concurrent
+   connection writes, socket shutdown, and message safety.
+
+4. **server_integration** (`tests/server_test.cpp`) - Multi-client loopback
+   integration test covering parser limits, response IDs, and server shutdown.
+
+### Running tests
 
 ```bash
 ctest --test-dir build --output-on-failure
+```
 
+### Running with sanitizers
+
+ASAN includes UndefinedBehaviorSanitizer. ASAN/UBSAN and TSAN cannot be enabled
+together. On the benchmark WSL2 environment, the integration test passed under
+ASAN/UBSAN. GCC TSAN could compile but could not start because WSL reported
+`ThreadSanitizer: unexpected memory mapping`; run the documented TSAN build on
+a native Linux host or CI runner for a meaningful race check.
+
+```bash
 cmake -S . -B build-asan -DENABLE_ASAN=ON
 cmake --build build-asan -j
 ctest --test-dir build-asan --output-on-failure
@@ -124,12 +148,6 @@ cmake -S . -B build-tsan -DENABLE_TSAN=ON
 cmake --build build-tsan -j
 ctest --test-dir build-tsan --output-on-failure
 ```
-
-ASAN includes UndefinedBehaviorSanitizer. ASAN/UBSAN and TSAN cannot be enabled
-together. On the benchmark WSL2 environment, the integration test passed under
-ASAN/UBSAN. GCC TSAN could compile but could not start because WSL reported
-`ThreadSanitizer: unexpected memory mapping`; run the documented TSAN build on
-a native Linux host or CI runner for a meaningful race check.
 
 ## Reproducible benchmarks
 
